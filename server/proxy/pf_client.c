@@ -22,6 +22,10 @@
  */
 
 #include <freerdp/config.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winpr/json.h> // Include the custom JSON library header
 
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
@@ -762,18 +766,167 @@ static BOOL pf_client_connect_without_nla(pClientContext* pc)
 	return freerdp_connect(instance);
 }
 
+// Function to read credentials from a file
+static BOOL read_credentials_from_file(const char* input_username, char* target_server, size_t target_server_len, char* password, size_t password_len)
+{
+    const char* filePath = "/var/lib/procyon/ssl/rdpservers.json";
+    FILE* file = fopen(filePath, "r");
+    if (!file)
+    {
+        (void)fprintf(stderr, "Failed to open credentials file: %s\n", filePath);
+        return FALSE;
+    }
+
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    char* fileContent = (char*)malloc(fileSize + 1);
+    if (!fileContent)
+    {
+        fclose(file);
+        (void)fprintf(stderr, "Failed to allocate memory for file content\n");
+        return FALSE;
+    }
+
+    fread(fileContent, 1, fileSize, file);
+    fileContent[fileSize] = '\0';
+    fclose(file);
+
+    WINPR_JSON* parsed_json = WINPR_JSON_Parse(fileContent);
+    free(fileContent);
+
+    if (!parsed_json)
+    {
+        (void)fprintf(stderr, "Failed to parse credentials from file\n");
+        return FALSE;
+    }
+
+    WINPR_JSON* json_target_server = WINPR_JSON_GetObjectItem(parsed_json, "current_target_server");
+    if (!json_target_server)
+    {
+        (void)fprintf(stderr, "Failed to get current target server from JSON\n");
+        WINPR_JSON_Delete(parsed_json);
+        return FALSE;
+    }
+
+    const char* target_server_str = WINPR_JSON_GetStringValue(json_target_server);
+    if (!target_server_str)
+    {
+        (void)fprintf(stderr, "Failed to get string value for current target server\n");
+        WINPR_JSON_Delete(parsed_json);
+        return FALSE;
+    }
+
+    // Copy the target server
+    strncpy(target_server, target_server_str, target_server_len - 1);
+    target_server[target_server_len - 1] = '\0';
+	(void)fprintf(stdout, "target_server: %s", target_server);
+
+    WINPR_JSON* rdp_servers = WINPR_JSON_GetObjectItem(parsed_json, "rdp_servers");
+    if (!rdp_servers)
+    {
+        (void)fprintf(stderr, "Failed to get rdp_servers from JSON\n");
+        WINPR_JSON_Delete(parsed_json);
+        return FALSE;
+    }
+
+    WINPR_JSON* server_json = WINPR_JSON_GetObjectItem(rdp_servers, target_server_str);
+    if (!server_json)
+    {
+        (void)fprintf(stderr, "Failed to get server information for %s\n", target_server_str);
+        WINPR_JSON_Delete(parsed_json);
+        return FALSE;
+    }
+
+    WINPR_JSON* json_credentials = WINPR_JSON_GetObjectItem(server_json, "credentials");
+    if (!json_credentials)
+    {
+        (void)fprintf(stderr, "Failed to get credentials from JSON\n");
+        WINPR_JSON_Delete(parsed_json);
+        return FALSE;
+    }
+
+    // Iterate over the credentials array to find the matching username
+    size_t credentials_count = WINPR_JSON_GetArraySize(json_credentials);
+    BOOL found = FALSE;
+    for (size_t i = 0; i < credentials_count; i++)
+    {
+        WINPR_JSON* credential = WINPR_JSON_GetArrayItem(json_credentials, i);
+        WINPR_JSON* json_username = WINPR_JSON_GetObjectItem(credential, "username");
+        WINPR_JSON* json_password = WINPR_JSON_GetObjectItem(credential, "password");
+
+        if (!json_username || !json_password)
+        {
+            continue;
+        }
+
+        const char* username_str = WINPR_JSON_GetStringValue(json_username);
+        const char* password_str = WINPR_JSON_GetStringValue(json_password);
+
+        if (!username_str || !password_str)
+        {
+            continue;
+        }
+
+        if (strcmp(input_username, username_str) == 0)
+        {
+            // Copy the password
+            strncpy(password, password_str, password_len - 1);
+            password[password_len - 1] = '\0';
+            found = TRUE;
+            break;
+        }
+    }
+
+    WINPR_JSON_Delete(parsed_json);
+
+    if (!found)
+    {
+        (void)fprintf(stderr, "Username not found in credentials\n");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static BOOL pf_client_connect(freerdp* instance)
 {
 	pClientContext* pc = NULL;
 	rdpSettings* settings = NULL;
 	BOOL rc = FALSE;
 	BOOL retry = FALSE;
+    char target_server[256] = { 0 };
+    char password[256] = { 0 };
 
 	WINPR_ASSERT(instance);
 	pc = (pClientContext*)instance->context;
 	WINPR_ASSERT(pc);
 	settings = instance->context->settings;
 	WINPR_ASSERT(settings);
+
+    const char* username = freerdp_settings_get_string(settings, FreeRDP_Username);
+
+    if (!username)
+    {
+        PROXY_LOG_ERR(TAG, pc, "Username is not set in settings");
+        return FALSE;
+    }
+
+    // Read credentials from file
+    if (!read_credentials_from_file(username, target_server, sizeof(target_server), password, sizeof(password)))
+    {
+        PROXY_LOG_ERR(TAG, pc, "Failed to read credentials from file");
+        return FALSE;
+    }
+
+    // Set the credentials in the settings
+    if (!freerdp_settings_set_string(settings, FreeRDP_Password, password) ||
+        !freerdp_settings_set_string(settings, FreeRDP_ServerHostname, target_server))
+    {
+        PROXY_LOG_ERR(TAG, pc, "Failed to set credentials in settings");
+        return FALSE;
+    }
 
 	PROXY_LOG_INFO(TAG, pc, "connecting using client info: Username: %s, Domain: %s",
 	               freerdp_settings_get_string(settings, FreeRDP_Username),
