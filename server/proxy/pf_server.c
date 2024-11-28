@@ -76,6 +76,7 @@ static BOOL pf_server_parse_target_from_routing_token(rdpContext* context, rdpSe
 	const char* routing_token = freerdp_nego_get_routing_token(context, &routing_token_length);
 	pServerContext* ps = (pServerContext*)context;
 
+	PROXY_LOG_INFO(TAG, ps, "routing token: %s", routing_token);
 	if (!routing_token)
 		return FALSE;
 
@@ -93,6 +94,7 @@ static BOOL pf_server_parse_target_from_routing_token(rdpContext* context, rdpSe
 	const char* target = freerdp_settings_get_string(settings, targetID);
 	colon = strchr(target, ':');
 
+	PROXY_LOG_INFO(TAG, ps, "target: %s", target);
 	if (colon)
 	{
 		/* port is specified */
